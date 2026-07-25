@@ -1,0 +1,7 @@
+{
+  "name": "vertex-billing-razorpay-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Server-side proxy so the Vertex Billing desktop app never ships the Razorpay key_secret",
+  "main": "index.js"
+}
