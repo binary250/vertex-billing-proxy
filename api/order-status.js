@@ -1,16 +1,16 @@
 /**
- * GET /api/order-status?orderId=order_xxx
- * Returns: { status: 'paid' | 'failed' | 'pending', paymentId?, signature?, email?, error? }
+ * GET /api/order-status?orderId=VB_xxx
+ * Returns: { status: 'paid' | 'failed' | 'pending', email? }
  *
- * Used as the slow-path fallback the app already relies on (polling every
- * ~3s) in case the Checkout `handler()` callback doesn't fire reliably
- * inside the Electron webview. Same behavior as before, just routed
- * through here instead of hitting Razorpay directly with the secret.
+ * Cashfree doesn't need a signature-verification step like Razorpay —
+ * asking "is this order paid?" directly against their authenticated API
+ * is itself the source of truth. Simpler than the Razorpay proxy in
+ * that specific way.
  */
 
 'use strict';
 
-const { rzpRequest, requireProxyKey } = require('../lib/razorpay');
+const { cfRequest, requireProxyKey } = require('../lib/cashfree');
 
 module.exports = async (req, res) => {
   if (req.method !== 'GET') {
@@ -26,25 +26,14 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const orderData = await rzpRequest('GET', `/orders/${orderId}/payments`);
-    const paid = orderData.items?.find((p) => p.status === 'captured' || p.status === 'authorized');
-    const failed = orderData.items?.find((p) => p.status === 'failed');
-
-    if (paid) {
-      const signature = require('crypto')
-        .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-        .update(`${orderId}|${paid.id}`)
-        .digest('hex');
-      res.status(200).json({
-        status: 'paid',
-        paymentId: paid.id,
-        signature, // pre-computed so the app's existing "done()" shape needs no changes
-        email: paid.email || '',
-      });
+    const order = await cfRequest('GET', `/orders/${encodeURIComponent(orderId)}`);
+    // order_status: ACTIVE (created, awaiting payment) | PAID | EXPIRED | TERMINATED
+    if (order.order_status === 'PAID') {
+      res.status(200).json({ status: 'paid', email: order.customer_details?.customer_email || '' });
       return;
     }
-    if (failed) {
-      res.status(200).json({ status: 'failed', error: failed.error_description || 'Payment failed' });
+    if (order.order_status === 'EXPIRED' || order.order_status === 'TERMINATED') {
+      res.status(200).json({ status: 'failed', error: `Order ${order.order_status.toLowerCase()}` });
       return;
     }
     res.status(200).json({ status: 'pending' });

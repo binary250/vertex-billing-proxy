@@ -1,16 +1,16 @@
 /**
  * POST /api/create-order
- * Body: { planId: 'LIFETIME' | 'AMC_RENEWAL', machineId, businessName }
- * Returns: { orderId, amount, currency, keyId }
+ * Body: { planId: 'LIFETIME' | 'AMC_RENEWAL', machineId, businessName, phone, email }
+ * Returns: { orderId, paymentSessionId }
  *
- * The app never sends an amount — it only sends which plan it wants,
- * and the price comes from PLANS here on the server. That's what stops
- * someone from patching the app to request a ₹1 "Lifetime License" order.
+ * The app never sends an amount — only which plan it wants. The price
+ * comes from PLANS here on the server, same protection as the Razorpay
+ * version: stops a patched app from requesting a ₹1 "Lifetime" order.
  */
 
 'use strict';
 
-const { rzpRequest, requireProxyKey, readJsonBody, PLANS, RAZORPAY_KEY_ID } = require('../lib/razorpay');
+const { cfRequest, requireProxyKey, readJsonBody, PLANS } = require('../lib/cashfree');
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -19,7 +19,7 @@ module.exports = async (req, res) => {
   }
   if (!requireProxyKey(req, res)) return;
 
-  const { planId, machineId, businessName } = readJsonBody(req);
+  const { planId, machineId, businessName, phone, email } = readJsonBody(req);
   const plan = PLANS[planId];
   if (!plan) {
     res.status(400).json({ error: `Unknown plan: ${planId}` });
@@ -30,24 +30,32 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // Cashfree requires a customer_id and customer_phone on every order.
+  // machineId doubles as a stable customer_id since we don't run user accounts.
+  const orderId = `VB_${String(machineId).slice(0, 10)}_${Date.now()}`;
+
   try {
-    const order = await rzpRequest('POST', '/orders', {
-      amount: plan.amount,
-      currency: 'INR',
-      receipt: `VD_${String(machineId).slice(0, 8)}_${Date.now()}`,
-      notes: {
-        machine_id: machineId,
-        plan: planId,
-        business_name: businessName || 'Vertex Billing User',
-        app: 'Vertex Billing',
+    const order = await cfRequest('POST', '/orders', {
+      order_id: orderId,
+      order_amount: plan.amount,
+      order_currency: 'INR',
+      customer_details: {
+        customer_id: String(machineId).slice(0, 40),
+        customer_phone: phone || '9999999999', // Cashfree requires a phone; placeholder if app doesn't collect one
+        customer_email: email || undefined,
+        customer_name: businessName || 'Vertex Billing User',
       },
+      order_meta: {
+        // return_url just needs to exist — the app doesn't navigate a real browser here;
+        // the desktop app watches for navigation to this URL pattern and reads order_id off it.
+        return_url: 'https://vertex-billing-proxy.vercel.app/api/return?order_id={order_id}',
+      },
+      order_note: `${plan.label} | plan=${planId} | machine=${machineId}`,
     });
 
     res.status(200).json({
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      keyId: RAZORPAY_KEY_ID, // public key — safe to send to the client for Checkout.js
+      orderId: order.order_id,
+      paymentSessionId: order.payment_session_id,
     });
   } catch (err) {
     res.status(502).json({ error: `Could not create order: ${err.message}` });
